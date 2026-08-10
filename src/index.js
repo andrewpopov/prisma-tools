@@ -300,10 +300,30 @@ function resolveContext({ argv = [], cwd = process.cwd(), env = process.env, con
   const resolvedConfig = mergeConfig(config);
   const options = parseArgs(argv);
   const originalEnvKeys = new Set(Object.keys(env));
+
+  // Env-loading / mode-resolution precedence (highest to lowest):
+  //   1. an explicit `options.mode` (--prod/--dev, or a caller-supplied mode) —
+  //      resolveMode checks this before it ever looks at `env`, so file-loading
+  //      order can't affect it.
+  //   2. a variable already present on the real process/caller env BEFORE any
+  //      file is loaded — captured in `originalEnvKeys`; loadEnvFile refuses to
+  //      overwrite these keys even when called with override:true.
+  //   3. the mode-specific file (`.env.local` / `.env.production`, or a custom
+  //      path from PRISMA_ENV_FILE) — loaded second, with override:true, so it
+  //      wins over the base file for ordinary variables.
+  //   4. the base `.env` file — loaded FIRST (override:false) so that a mode
+  //      key (PRISMA_TOOLS_ENV/PRISMA_ENV) or PRISMA_ENV_FILE set only in
+  //      `.env` is visible to resolveMode/modeEnvFile below, matching README
+  //      "Env file loading" ("`.env` is loaded first" / "PRISMA_ENV_FILE can
+  //      point at a custom mode-specific env file"). Loading it first does not
+  //      let it win a conflict: rule 2 still shields real env vars via
+  //      originalEnvKeys, and the mode file in step 3 still loads with
+  //      override:true so it still overrides base-file values.
+  loadEnvFile(path.resolve(cwd, resolvedConfig.envFiles.base), { env, originalEnvKeys });
+
   const mode = resolveMode(options.mode, env, resolvedConfig.envKeys.mode);
   const modeEnvFile = env.PRISMA_ENV_FILE || (mode === 'prod' ? resolvedConfig.envFiles.prod : resolvedConfig.envFiles.dev);
 
-  loadEnvFile(path.resolve(cwd, resolvedConfig.envFiles.base), { env, originalEnvKeys });
   loadEnvFile(path.resolve(cwd, modeEnvFile), { env, originalEnvKeys, override: true });
 
   const commandWithoutConnection = new Set(['format', 'generate', 'validate']);

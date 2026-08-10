@@ -116,7 +116,8 @@ npx prisma-tools --prod migrate deploy
 
 For schema-aware Prisma commands, the wrapper appends `--schema <path>` using
 the selected provider. If the command already includes `--schema`, the wrapper
-keeps the caller-provided value.
+keeps the caller-provided value. `migrate diff` and `db execute` are
+deliberately excluded from this auto-appending — see Non-goals.
 
 Run a child command through the wrapper:
 
@@ -287,6 +288,16 @@ tooling layer might:
 - **No `migrate diff` schema handling.** `migrate diff` is deliberately
   excluded from schema-arg auto-appending (see `shouldAppendSchemaArg`) since
   its schema semantics differ from the other `migrate` subcommands.
+- **No `db execute` schema/config routing.** `db execute` is deliberately
+  excluded from schema-arg auto-appending. Its datasource flags are not
+  stable across Prisma versions this package might run under: `--schema` and
+  `--url` selected the datasource for `db execute` for years, but Prisma 7
+  removed both in favor of configuring the connection in `prisma.config.ts`
+  (see the Prisma v7 upgrade guide). Auto-appending `--schema` would work on
+  older Prisma and break on Prisma 7+ with an unrecognized-flag error, and
+  this package does not detect the installed Prisma version. Pass `--schema`
+  or `--url` yourself on Prisma <7, or configure `prisma.config.ts` on
+  Prisma 7+.
 - **No monorepo / multi-schema support.** One SQLite schema and one PostgreSQL
   schema per config; apps with more complex layouts should wrap this package
   rather than ask it to grow that capability.

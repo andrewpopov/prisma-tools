@@ -2,6 +2,7 @@ import { createRequire } from 'module';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
@@ -506,9 +507,33 @@ describe('hasSchemaArg / shouldAppendSchemaArg', () => {
     expect(shouldAppendSchemaArg(['migrate', 'diff'])).toBe(false);
     expect(shouldAppendSchemaArg(['db', 'pull'])).toBe(true);
     expect(shouldAppendSchemaArg(['db', 'push'])).toBe(true);
+    // Intentional (PKG-144), like `migrate diff` above: `db execute`'s
+    // datasource flags (`--schema`/`--url`) are not stable across the Prisma
+    // versions this package might run under (Prisma 7 removed both in favor
+    // of `prisma.config.ts`), so auto-appending `--schema` would break on
+    // some installs. See README Non-goals.
     expect(shouldAppendSchemaArg(['db', 'execute'])).toBe(false);
     expect(shouldAppendSchemaArg(['--help'])).toBe(false);
     expect(shouldAppendSchemaArg(['generate', '--schema', 'x.prisma'])).toBe(false);
+  });
+});
+
+// PKG-144 finding 2: README:117 used to claim the wrapper appends `--schema`
+// for "schema-aware Prisma commands" without calling out that `db execute`
+// is excluded (only `migrate diff` was documented as an exception), while
+// `shouldAppendSchemaArg` already excluded it. The code was right; the docs
+// were the gap. This locks the docs to the code instead of the other way
+// around: `db execute`'s datasource flags are not stable across the Prisma
+// versions this package might run under (see the shouldAppendSchemaArg test
+// above), so this stays a documented non-goal rather than gaining
+// version-detection machinery this package doesn't otherwise have.
+describe('README documents the db execute schema-arg exclusion (PKG-144)', () => {
+  it('lists `db execute` as excluded from schema auto-appending, alongside `migrate diff`', () => {
+    const readmePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'README.md');
+    const readme = fs.readFileSync(readmePath, 'utf8');
+
+    expect(readme).toMatch(/`migrate diff`.{0,40}`db execute`.{0,60}excluded/s);
+    expect(readme).toMatch(/No `db execute` schema\/config routing/);
   });
 });
 
@@ -534,9 +559,11 @@ describe('resolveContext additional contract tests', () => {
       '.env.local': 'DATABASE_URL=file:./dev.db\n',
       '.env.custom': 'DATABASE_URL=file:./custom.db\n',
     });
-    // PRISMA_ENV_FILE must be set on the env object itself: resolveContext reads
-    // env.PRISMA_ENV_FILE before loading any .env file, so a .env file cannot
-    // define it.
+    // A real caller-set PRISMA_ENV_FILE wins even though the base `.env` file
+    // is now loaded first (see the "env-loading precedence" describe block
+    // below): loadEnvFile never overwrites a key present in originalEnvKeys,
+    // so a value already on the passed `env` object always beats anything a
+    // `.env` file could supply for the same key.
     const env: NodeJS.ProcessEnv = { PRISMA_ENV_FILE: '.env.custom' };
 
     const context = resolveContext({ argv: ['generate'], cwd, env });
@@ -576,6 +603,83 @@ describe('resolveContext additional contract tests', () => {
     expect(env.SOME_KEY).toBe('fromfile');
     expect(env.PRISMA_TOOLS_ENV).toBe('dev');
     expect(env.PRISMA_TOOLS_DATABASE_PROVIDER).toBe('sqlite');
+  });
+});
+
+// PKG-144 finding 1: the base `.env` file must be visible to mode resolution
+// and PRISMA_ENV_FILE selection, since README "Env file loading" documents
+// `.env` as loaded first and able to select the mode-specific file. These
+// tests pin the full precedence order:
+//   1. explicit `--prod`/`--dev` (options.mode) always wins
+//   2. a variable already present on the real process/caller env (tracked via
+//      originalEnvKeys) always wins over any `.env` file
+//   3. the mode-specific file (or PRISMA_ENV_FILE) overrides the base `.env`
+//      file for ordinary variables
+//   4. the base `.env` file can itself supply the mode key or PRISMA_ENV_FILE
+//      used to pick which mode-specific file loads
+describe('resolveContext env-loading precedence (PKG-144)', () => {
+  it('lets the base .env file select prod mode via PRISMA_TOOLS_ENV, loading .env.production', () => {
+    const cwd = makeTempDir();
+    writeProjectEnv(cwd, {
+      '.env': 'PRISMA_TOOLS_ENV=prod\n',
+      '.env.production': 'DATABASE_URL=postgresql://user:secret@db.example/app\n',
+    });
+    const env: NodeJS.ProcessEnv = {};
+
+    const context = resolveContext({ argv: ['generate'], cwd, env });
+
+    expect(context.mode).toBe('prod');
+    expect(context.databaseUrl).toBe('postgresql://user:secret@db.example/app');
+  });
+
+  it('lets the base .env file point PRISMA_ENV_FILE at a custom mode-specific file', () => {
+    const cwd = makeTempDir();
+    writeProjectEnv(cwd, {
+      '.env': 'PRISMA_ENV_FILE=.env.custom\n',
+      '.env.custom': 'DATABASE_URL=file:./custom.db\n',
+    });
+    const env: NodeJS.ProcessEnv = {};
+
+    const context = resolveContext({ argv: ['generate'], cwd, env });
+
+    expect(context.databaseUrl).toBe('file:./custom.db');
+  });
+
+  it('an explicit --prod/--dev flag still wins over a mode key set in .env', () => {
+    const cwd = makeTempDir();
+    writeProjectEnv(cwd, {
+      '.env': 'PRISMA_TOOLS_ENV=prod\n',
+    });
+    const env: NodeJS.ProcessEnv = {};
+
+    const context = resolveContext({ argv: ['--dev', 'generate'], cwd, env });
+
+    expect(context.mode).toBe('dev');
+  });
+
+  it('a mode variable already set on the real (caller) env still wins over .env', () => {
+    const cwd = makeTempDir();
+    writeProjectEnv(cwd, {
+      '.env': 'PRISMA_TOOLS_ENV=prod\n',
+    });
+    const env: NodeJS.ProcessEnv = { PRISMA_TOOLS_ENV: 'dev' };
+
+    const context = resolveContext({ argv: ['generate'], cwd, env });
+
+    expect(context.mode).toBe('dev');
+  });
+
+  it('the mode-specific file still overrides an ordinary variable set in the base .env file', () => {
+    const cwd = makeTempDir();
+    writeProjectEnv(cwd, {
+      '.env': 'DATABASE_URL=file:./base.db\n',
+      '.env.local': 'DATABASE_URL=file:./dev.db\n',
+    });
+    const env: NodeJS.ProcessEnv = {};
+
+    const context = resolveContext({ argv: ['generate'], cwd, env });
+
+    expect(context.databaseUrl).toBe('file:./dev.db');
   });
 });
 
