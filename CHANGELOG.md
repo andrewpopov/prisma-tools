@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.3
+
+- Document that db execute is excluded from schema auto-appending, matching migrate diff
+  README used to describe schema-arg auto-appending as covering "schema-aware
+  Prisma commands" and documented only `migrate diff` as an exception, but
+  `shouldAppendSchemaArg` also excluded `db execute` without saying so. The code
+  was right and stays unchanged: `db execute`'s datasource flags are not stable
+  across the Prisma versions this package might run under (Prisma 7 removed
+  `--schema`/`--url` from `db execute` in favor of `prisma.config.ts`), and this
+  package does not detect the installed Prisma version, so auto-appending
+  `--schema` there would work on some installs and break on others. README now
+  lists `db execute` alongside `migrate diff` as a documented non-goal.
+- Load the base .env file before mode resolution so it can select the mode/custom env file
+  `resolveContext` used to resolve `dev`/`prod` mode and pick the mode-specific
+  env file *before* loading the base `.env` file, so a mode key
+  (`PRISMA_TOOLS_ENV`/`PRISMA_ENV`) or `PRISMA_ENV_FILE` set only in `.env` was
+  silently ignored — the wrong mode-specific file could load instead of the one
+  `.env` asked for. `.env` is now loaded first, so it can select the mode and
+  the mode-specific/custom env file as documented. Precedence is unchanged
+  otherwise: an explicit `--prod`/`--dev` flag and any variable already present
+  in the real process environment still win over anything in `.env`, and the
+  mode-specific file still overrides the base file for ordinary variables.
+
 ## 0.4.2
 
 - Manage releases with release-kit (fragment-based CHANGELOG + version bump)
